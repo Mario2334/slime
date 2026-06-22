@@ -1279,9 +1279,14 @@ export class ConnectionDO implements DurableObject {
         if (match) threadId = match[1];
       }
 
+      // ON CONFLICT(id) DO NOTHING: a client may reuse/replay an id (e.g. browser
+      // reconnect resending a user.message, or a misbehaving agent). The real
+      // OpenClaw plugin always mints a fresh messageId per reply, so this is
+      // defense-in-depth — never throw or spam logs on a duplicate id.
       await this.env.DB.prepare(
         `INSERT INTO messages (id, user_id, session_key, thread_id, sender, text, media_url, a2ui, encrypted, sender_agent_id, target_agent_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO NOTHING`,
       )
         .bind(id, userId, opts.sessionKey, threadId ?? null, opts.sender, opts.text, opts.mediaUrl ?? null, opts.a2ui ?? null, encrypted, opts.senderAgentId ?? null, opts.targetAgentId ?? null)
         .run();

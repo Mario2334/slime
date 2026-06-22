@@ -199,6 +199,32 @@ function handleMessage(msg) {
     case "task.scan.request":
       send({ type: "task.scan.result", tasks: [] });
       break;
+    case "task.schedule": {
+      // Plugin creates the cron job and acks with the real cronJobId.
+      const cronJobId = (msg.cronJobId && msg.cronJobId.length) ? msg.cronJobId : `cron_${randomUUID().slice(0, 8)}`;
+      logRecv(`[task.schedule] taskId=${msg.taskId} cron="${msg.schedule}" name="${msg.name}" → ack ${cronJobId}`);
+      send({ type: "task.schedule.ack", ok: true, taskId: msg.taskId, cronJobId });
+      break;
+    }
+    case "task.run": {
+      // Simulate a job run: running → ok, persisted by the DO into the jobs table.
+      const cronJobId = msg.cronJobId || `cron_${randomUUID().slice(0, 8)}`;
+      const jobId = `job_${randomUUID().slice(0, 8)}`;
+      const sessionKey = msg.sessionKey || "";
+      const startedAt = Math.floor(Date.now() / 1000);
+      logRecv(`[task.run] taskId=${msg.taskId} → simulating run ${jobId}`);
+      send({ type: "job.update", taskId: msg.taskId, cronJobId, jobId, sessionKey, status: "running", summary: "", startedAt });
+      setTimeout(() => {
+        send({ type: "job.update", taskId: msg.taskId, cronJobId, jobId, sessionKey, status: "ok",
+          summary: `Mock run of "${msg.name || msg.taskId}"`, startedAt,
+          finishedAt: Math.floor(Date.now() / 1000), durationMs: 400 });
+      }, 400);
+      break;
+    }
+    case "task.delete":
+      logRecv(`[task.delete] cronJobId=${msg.cronJobId}`);
+      // The DO does not require an ack for delete; nothing to send back.
+      break;
     case "models.request":
       send({ type: "models.list", models: [{ id: MODEL, name: "Mock OpenClaw v2", provider: "mock" }] });
       break;
@@ -426,12 +452,14 @@ async function handleTraceSample(sessionKey, messageId) {
 
 // ── Reply helpers ──
 
-function sendReply(sessionKey, text, messageId) {
-  send({ type: "agent.text", agentId: AGENT_ID, sessionKey, text, messageId: messageId || randomUUID() });
+function sendReply(sessionKey, text, replyToId) {
+  // Agent replies always carry their own fresh messageId (like the real plugin);
+  // replyToId correlates back to the user message that prompted the reply.
+  send({ type: "agent.text", agentId: AGENT_ID, sessionKey, text, messageId: randomUUID(), replyToId: replyToId ?? undefined });
   logSend(`[agent.text] "${trunc(text, 60)}"`);
 }
 
-async function sendStreamingReply(sessionKey, text, messageId) {
+async function sendStreamingReply(sessionKey, text, replyToId) {
   const runId = randomUUID().slice(0, 8);
   send({ type: "agent.stream.start", agentId: AGENT_ID, sessionKey, runId });
 
@@ -443,7 +471,7 @@ async function sendStreamingReply(sessionKey, text, messageId) {
     if (i % 5 === 0) await sleep(20);
   }
 
-  send({ type: "agent.text", agentId: AGENT_ID, sessionKey, text, messageId: messageId || randomUUID() });
+  send({ type: "agent.text", agentId: AGENT_ID, sessionKey, text, messageId: randomUUID(), replyToId: replyToId ?? undefined });
   send({ type: "agent.stream.end", agentId: AGENT_ID, sessionKey, runId });
   logSend(`[stream] ${words.length} words`);
 }
