@@ -221,6 +221,12 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
   const sugRef = useRef<HTMLDivElement>(null);
 
+  // Ephemeral "command sent" receipt — shown briefly after sending a slash
+  // command that may get no agent reply (e.g. /model, /clear). Pure UI state,
+  // never persisted.
+  const [commandAck, setCommandAck] = useState<{ sessionKey: string; cmd: string } | null>(null);
+  const ackTimer = useRef<number | null>(null);
+
   const sessionKey = state.selectedSessionKey;
 
   const { skills: sortedSkills } = useMemo(
@@ -299,6 +305,14 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
   useEffect(() => {
     setDismissedFor(null);
   }, [input]);
+
+  // Clear the command-ack timer on unmount.
+  useEffect(
+    () => () => {
+      if (ackTimer.current) window.clearTimeout(ackTimer.current);
+    },
+    [],
+  );
 
   // Close the suggestion menu on outside click (mirror the model-dropdown
   // pattern), ignoring clicks on the textarea itself.
@@ -611,12 +625,16 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
 
     dispatch({ type: "ADD_MESSAGE", message: msg });
 
-    // Show a "typing" placeholder while we wait for the agent's first byte.
-    // Covers non-streaming replies; cleared by STREAM_START / the reply itself.
     // Slash commands are directives that often produce no chat reply (e.g.
-    // /model, /clear, /reset) — skip the placeholder for them, otherwise it
-    // would spin forever waiting for an agent.text that never arrives.
-    if (!isSkill) {
+    // /model, /clear, /reset). For those, show a brief "sent" receipt instead
+    // of the typing placeholder (which would spin forever waiting for a reply
+    // that never comes). Normal messages keep the typing placeholder.
+    if (isSkill) {
+      const cmd = trimmed.match(/^\/\S+/)?.[0] ?? trimmed;
+      setCommandAck({ sessionKey, cmd });
+      if (ackTimer.current) window.clearTimeout(ackTimer.current);
+      ackTimer.current = window.setTimeout(() => setCommandAck(null), 2800);
+    } else {
       dispatch({ type: "START_PENDING", sessionKey });
     }
 
@@ -937,6 +955,9 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
         })}
         {state.pendingSessionKey && state.pendingSessionKey === state.selectedSessionKey && (
           <TypingBubble />
+        )}
+        {commandAck && commandAck.sessionKey === state.selectedSessionKey && (
+          <CommandAckBubble cmd={commandAck.cmd} />
         )}
         <div ref={messagesEndRef} />
       </div>
@@ -1343,6 +1364,27 @@ function TypingBubble() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Ephemeral "command sent" receipt — shown briefly after sending a slash
+ * command that may produce no agent reply (e.g. /model, /clear). Pure UI
+ * state, never persisted to D1.
+ */
+function CommandAckBubble({ cmd }: { cmd: string }) {
+  return (
+    <div className="flex items-center justify-center py-2">
+      <span
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-caption"
+        style={{ background: "var(--bg-hover)", color: "var(--text-secondary)" }}
+      >
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+        </svg>
+        Sent <span className="font-mono">{cmd}</span>
+      </span>
     </div>
   );
 }
