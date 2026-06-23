@@ -5,6 +5,7 @@ import { MessageContent } from "./MessageContent";
 import { SessionTabs } from "./SessionTabs";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useIMEComposition } from "../hooks/useIMEComposition";
+import { Capacitor } from "@capacitor/core";
 import { dlog } from "../debug-log";
 import { randomUUID } from "../utils/uuid";
 import { E2eService } from "../e2e";
@@ -48,6 +49,9 @@ const DEFAULT_SKILLS: Skill[] = [
   { cmd: "/translate", label: "Translate", icon: "翻" },
   { cmd: "/reset",     label: "Reset",     icon: "R" },
 ];
+
+/** Max rows shown in the slash-command suggestion box (scrolls past this). */
+const MAX_SUGGESTIONS = 8;
 
 // --- v2 storage types ---
 type SkillEntry = { total: number; daily: Record<string, number> };
@@ -156,6 +160,37 @@ function getSortedSkills(): { skills: Skill[]; store: SkillStore } {
   return { skills, store };
 }
 
+/**
+ * Detect the slash-command token the user is currently typing.
+ *
+ * Commands are only meaningful at the start of a message (the send path keys
+ * off `trimmed.startsWith("/")` and `recordSkillUsage` matches `^\/(\S+)`), so
+ * the menu opens only when '/' is the first non-whitespace character AND the
+ * caret sits inside the still-space-less command token that begins there. A
+ * mid-sentence '/' (e.g. "see /etc/hosts") never triggers.
+ *
+ * Returns the token *including* the leading '/', plus the [start,end) span it
+ * occupies in `input` — used to replace exactly that span when a command is
+ * accepted.
+ */
+function activeCommandToken(
+  input: string,
+  caret: number,
+): { active: boolean; token: string; start: number; end: number } {
+  const startMatch = input.match(/^\s*\//);
+  if (!startMatch) return { active: false, token: "", start: -1, end: -1 };
+  const start = startMatch[0].length - 1; // index of the '/'
+  const afterSlash = input.slice(start + 1);
+  const wsRel = afterSlash.search(/\s/);
+  const end = start + 1 + (wsRel === -1 ? afterSlash.length : wsRel); // exclusive
+  // Caret must sit within the token — once a space is typed, the command word
+  // is finished and the menu closes.
+  if (caret < start + 1 || caret > end) {
+    return { active: false, token: "", start: -1, end: -1 };
+  }
+  return { active: true, token: input.slice(start, end), start, end };
+}
+
 /** Flat-row message display + composer, per design guideline section 5.2/5.6 */
 export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) {
   const state = useAppState();
@@ -177,12 +212,46 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
   const tabBarRef = useRef<HTMLDivElement>(null);
   const [tabBarWidth, setTabBarWidth] = useState(0);
 
+  // --- Slash-command autocomplete (Telegram-style suggestion box) ---
+  const [caret, setCaret] = useState(0);
+  const [sugIndex, setSugIndex] = useState(0);
+  // The token the user Escape-dismissed; cleared on the next input change so a
+  // fresh keystroke reopens the menu. Avoids the menu snapping back open the
+  // instant Escape is pressed while '/' is still typed.
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const sugRef = useRef<HTMLDivElement>(null);
+
   const sessionKey = state.selectedSessionKey;
 
-  const { skills: sortedSkills, store: skillStore } = useMemo(
+  const { skills: sortedSkills } = useMemo(
     () => getSortedSkills(),
     [skillVersion],
   );
+
+  // The slash token currently being typed (active only at message start) and the
+  // filtered, recency-ordered suggestions for it.
+  const cmdToken = activeCommandToken(input, caret);
+  const suggestions = useMemo(() => {
+    if (!cmdToken.active) return [];
+    const q = cmdToken.token.toLowerCase(); // includes the leading '/'
+    const matched = sortedSkills.filter((s) =>
+      q.length <= 1 ? true : s.cmd.toLowerCase().startsWith(q),
+    );
+    // Pin an exact match to the top so Enter accepts the obvious choice.
+    if (q.length > 1) {
+      const idx = matched.findIndex((s) => s.cmd.toLowerCase() === q);
+      if (idx > 0) {
+        const [exact] = matched.splice(idx, 1);
+        matched.unshift(exact);
+      }
+    }
+    return matched.slice(0, MAX_SUGGESTIONS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cmdToken.active, cmdToken.token, sortedSkills]);
+
+  // Open when an active token exists, IME is not composing, and the user hasn't
+  // Escape-dismissed this exact token.
+  const sugOpen = cmdToken.active && !isIMEActive() && dismissedFor !== cmdToken.token;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -220,6 +289,58 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [modelOpen]);
+
+  // Keep the highlighted index valid as the filtered list shrinks/grows.
+  useEffect(() => {
+    if (sugIndex >= suggestions.length) setSugIndex(0);
+  }, [suggestions.length, sugIndex]);
+
+  // A fresh keystroke clears an Escape-dismissal so the menu can reopen.
+  useEffect(() => {
+    setDismissedFor(null);
+  }, [input]);
+
+  // Close the suggestion menu on outside click (mirror the model-dropdown
+  // pattern), ignoring clicks on the textarea itself.
+  useEffect(() => {
+    if (!sugOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (
+        sugRef.current && !sugRef.current.contains(e.target as Node) &&
+        inputRef.current && !inputRef.current.contains(e.target as Node)
+      ) {
+        setDismissedFor(cmdToken.token);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [sugOpen, cmdToken.token]);
+
+  // Latest token, read by the keyboard-hide listener below (avoids resubscribing
+  // on every keystroke).
+  const tokenRef = useRef("");
+  useEffect(() => {
+    tokenRef.current = cmdToken.token;
+  }, [cmdToken.token]);
+
+  // On native (Capacitor) builds, dismiss the menu when the soft keyboard hides.
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let remove: (() => void) | undefined;
+    import("@capacitor/keyboard")
+      .then(({ Keyboard }) =>
+        Keyboard.addListener("keyboardWillHide", () =>
+          setDismissedFor(tokenRef.current),
+        ),
+      )
+      .then((handle) => {
+        remove = () => handle.remove();
+      })
+      .catch(() => {
+        /* keyboard plugin unavailable — no-op */
+      });
+    return () => remove?.();
+  }, []);
 
   // Measure tab bar width for adaptive model display
   useEffect(() => {
@@ -299,15 +420,34 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
     });
   }, [sessionKey, currentModel, state.user?.id, sendMessage, dispatch]);
 
-  const handleSkillClick = useCallback((cmd: string) => {
-    dlog.info("Skill", `Skill button clicked: ${cmd}`);
-    setInput((prev) => {
-      // If input already starts with this command, don't duplicate
-      if (prev.startsWith(cmd + " ") || prev === cmd) return prev;
-      return cmd + " ";
+  // Accept a slash command from the suggestion menu (keyboard / click). Replaces
+  // exactly the /token under the caret with `cmd + " "` (leaving any trailing
+  // text intact), then refocuses with the caret positioned to type arguments.
+  // Reads value + caret live from the textarea (via the ref) so it stays correct
+  // even if the closure's `input` is a keystroke behind the DOM.
+  const acceptCommand = useCallback((cmd: string) => {
+    dlog.info("Skill", `Command accepted: ${cmd}`);
+    const el = inputRef.current;
+    const value = el ? el.value : input;
+    const c = el ? (el.selectionStart ?? value.length) : value.length;
+    const { active, start, end } = activeCommandToken(value, c);
+    const from = active ? start : 0;
+    const to = active ? end : 0;
+    const before = value.slice(0, from);
+    const rest = value.slice(to);
+    const next = `${before}${cmd} ${rest}`;
+    const pos = (before + cmd + " ").length;
+    setInput(next);
+    setCaret(pos); // synchronous → no one-frame "still open" flicker
+    requestAnimationFrame(() => {
+      const el2 = inputRef.current;
+      if (!el2) return;
+      el2.setSelectionRange(pos, pos);
+      el2.focus({ preventScroll: true });
     });
-    inputRef.current?.focus();
-  }, []);
+    setSugIndex(0);
+    setDismissedFor(null);
+  }, [input]);
 
   // File upload helpers
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -485,6 +625,8 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
     });
 
     setInput("");
+    setSugIndex(0);
+    setDismissedFor(null);
 
     requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -795,42 +937,51 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
       </div>
 
       {/* Composer (section 5.6) */}
-      <div className="flex-shrink-0 px-3 sm:px-5 pb-3 sm:pb-4 pt-2">
-        {/* Skill buttons — sorted by recency-weighted score */}
-        <div className="flex items-center gap-1.5 pb-1.5 overflow-x-auto no-scrollbar">
-          {sortedSkills.map((skill) => {
-            const entry = skillStore[skill.cmd];
-            const count = entry?.total ?? 0;
-            const recent = entry ? recentCount(entry) : 0;
-            const isActive = input.startsWith(skill.cmd + " ") || input === skill.cmd;
-            return (
-              <button
-                key={skill.cmd}
-                onClick={() => handleSkillClick(skill.cmd)}
-                className="flex items-center gap-1 px-2 py-1 rounded-md text-xs whitespace-nowrap transition-colors shrink-0"
-                style={{
-                  background: isActive ? "var(--bg-active)" : "var(--bg-hover)",
-                  color: isActive ? "#fff" : "var(--text-secondary)",
-                  border: "1px solid transparent",
-                }}
-                title={`${skill.cmd}${count > 0 ? ` (total ${count}x${recent > 0 ? `, recent ${recent}x` : ""})` : ""}`}
-              >
-                <span className="font-mono text-[10px] opacity-70">{skill.cmd}</span>
-                {count > 0 && (
+      <div className="relative flex-shrink-0 px-3 sm:px-5 pb-3 sm:pb-4 pt-2">
+        {/* Slash-command suggestion box (Telegram-style). Anchored above the
+            composer; opens when the user types a message-start '/'. */}
+        {sugOpen && (
+          <div
+            ref={sugRef}
+            className="absolute bottom-full left-3 right-3 mb-1 z-50 rounded-md py-1 overflow-y-auto"
+            style={{
+              maxHeight: 320,
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border)",
+              boxShadow: "var(--shadow-md)",
+            }}
+          >
+            {suggestions.length === 0 ? (
+              <div className="px-3 py-2 text-caption" style={{ color: "var(--text-muted)" }}>
+                No matching commands
+              </div>
+            ) : (
+              suggestions.map((s, i) => (
+                <button
+                  key={s.cmd}
+                  // mousedown + preventDefault keeps focus in the textarea so the
+                  // menu doesn't blur/reopen on click.
+                  onMouseDown={(e) => { e.preventDefault(); acceptCommand(s.cmd); }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-caption transition-colors"
+                  style={{
+                    background: i === sugIndex ? "var(--bg-hover)" : "transparent",
+                    color: "var(--text-primary)",
+                  }}
+                  onMouseEnter={() => setSugIndex(i)}
+                >
                   <span
-                    className="ml-0.5 px-1 rounded-sm text-[10px] font-bold"
-                    style={{
-                      background: isActive ? "rgba(255,255,255,0.2)" : "var(--bg-surface)",
-                      color: isActive ? "#fff" : "var(--text-muted)",
-                    }}
+                    className="w-5 h-5 flex-shrink-0 flex items-center justify-center rounded font-mono text-[10px]"
+                    style={{ background: "var(--bg-active)", color: "#fff" }}
                   >
-                    {count}
+                    {s.icon}
                   </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+                  <span className="font-mono">{s.cmd}</span>
+                  <span style={{ color: "var(--text-secondary)" }}>— {s.label}</span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
 
         {/* Quote reply preview */}
         {quotedMessage && (
@@ -912,9 +1063,47 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              setCaret(e.target.selectionStart ?? e.target.value.length);
+            }}
+            onKeyUp={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
+            onClick={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
+            onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !isIMEActive()) {
+              // Never hijack keys during IME (CJK) composition.
+              if (e.nativeEvent.isComposing || isIMEActive()) return;
+
+              if (sugOpen && suggestions.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSugIndex((i) => (i + 1) % suggestions.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSugIndex((i) => (i - 1 + suggestions.length) % suggestions.length);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setDismissedFor(cmdToken.token);
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  acceptCommand(suggestions[sugIndex]?.cmd ?? suggestions[0].cmd);
+                  return;
+                }
+              } else if (sugOpen && e.key === "Escape") {
+                e.preventDefault();
+                setDismissedFor(cmdToken.token);
+                return;
+              }
+
+              // Default send path (unchanged) — reached when the menu is closed
+              // or open-but-empty for Enter.
+              if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 handleSend();
               }
@@ -936,6 +1125,28 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
           {/* Bottom toolbar */}
           <div className="flex items-center justify-between px-3 pb-2">
             <div className="flex items-center gap-1">
+              {/* Commands menu affordance — opens the Telegram-style suggestion box */}
+              <button
+                onClick={() => {
+                  setDismissedFor(null);
+                  setInput((prev) => (prev.startsWith("/") ? prev : "/"));
+                  requestAnimationFrame(() => {
+                    const el = inputRef.current;
+                    if (!el) return;
+                    el.focus({ preventScroll: true });
+                    const pos = el.value.length;
+                    el.setSelectionRange(pos, pos);
+                    setCaret(pos);
+                  });
+                }}
+                className="p-1.5 rounded hover:bg-[--bg-hover] transition-colors flex items-center justify-center"
+                style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}
+                title="Commands"
+                aria-label="Browse commands"
+                disabled={!state.openclawConnected}
+              >
+                <span className="text-base font-bold leading-none">/</span>
+              </button>
               {/* Image upload button */}
               <input
                 ref={fileInputRef}
