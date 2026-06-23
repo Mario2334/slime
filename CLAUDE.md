@@ -174,7 +174,37 @@ npx wrangler deploy --config wrangler.toml
 npx wrangler d1 migrations apply botschat-db --remote
 ```
 
-Production uses `ENVIRONMENT=production` (OAuth only). Secrets are set via `wrangler secret put`.
+Production uses `ENVIRONMENT=production`. Auth: custom email/password login (always enabled, env-seeded default account) **plus** Google/GitHub/Apple OAuth. Secrets are set via `wrangler secret put` (e.g. `JWT_SECRET`, `DEFAULT_LOGIN_EMAIL`, `DEFAULT_LOGIN_PASSWORD`).
+
+### Self-hosted deployment (Tailscale node)
+
+The v2 instance also runs self-hosted on a Tailscale node (`botschat`, `botschat.tail2874a5.ts.net`) as systemd `botschat.service` → `wrangler dev` on `:8787` → Tailscale Serve (tailnet-only HTTPS), with local Miniflare state. Deploy steps (SSH as **`root@botschat`** — the `id_ed25519` key is authorized for root only):
+
+```bash
+# 1. Push v2 to the fork (node origin ≠ fork, so we fetch the fork directly on step 3)
+git push origin v2                              # origin = github.com/Mario2334/slime
+
+# 2. Build the SPA locally (node lacks tsc/vite + only 1 GB RAM → can't build there)
+npm run build -w packages/web
+
+# 3. Update code on the node (fetch fork, hard-reset; .wrangler/state data is preserved)
+ssh root@botschat 'cd /opt/botschat-v2 && \
+  git fetch https://github.com/Mario2334/slime.git v2 && git reset --hard FETCH_HEAD'
+
+# 4. Ship the rebuilt dist (node has NO rsync → clear + scp)
+ssh root@botschat 'rm -rf /opt/botschat-v2/packages/web/dist'
+scp -r packages/web/dist root@botschat:/opt/botschat-v2/packages/web/dist
+
+# 5. Restart
+ssh root@botschat 'systemctl restart botschat.service'
+```
+
+Notes:
+- Adding a new worker var: append `KEY=value` to `/opt/botschat-v2/.env.botschat` (chmod 600) **and** add `--var KEY:${KEY}` to the `ExecStart=` line in `/etc/systemd/system/botschat.service` (systemd expands `${...}` from `EnvironmentFile`). Back up the unit first, then `systemctl daemon-reload`.
+- Never run `npm install` on the node — `node_modules` is a symlink to `/opt/botschat/node_modules` and a fresh install OOM-kills.
+- Miniflare gotcha: writes from `wrangler d1 execute --local` aren't seen by the running worker until a restart; API-driven writes are fine.
+- Default login on the node: `admin@botschat.local` / `botschat123` (rotate via `.env.botschat` + delete the D1 user row + restart).
+- Verify: `GET /api/auth/config` → `emailEnabled:true`; `POST /api/auth/login` seeds the default account on first call.
 
 ## Debugging Tips
 
