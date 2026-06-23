@@ -69,6 +69,8 @@ Notes:
 
 ## Local Development
 
+> **Workflow preference (v2):** Verify against the **deployed botschat Tailscale node** (`https://botschat.tail2874a5.ts.net`), not the local dev server. The node is the source of truth — it has the real OpenClaw plugin connected, real Miniflare state, and reflects what users actually see. Only run `./scripts/dev.sh` for isolated local iteration, and **stop it when done** (`lsof -ti:8787 | xargs kill -9`) so `:8787` doesn't linger. After any web change, build + deploy to the node (see [Self-hosted deployment](#self-hosted-deployment-tailscale-node)) and verify there.
+
 ### Quick Start
 
 ```bash
