@@ -68,6 +68,13 @@ export default function App() {
     return E2eService.subscribe(() => setE2eReady(E2eService.hasKey()));
   }, []);
 
+  // Open the Settings → Security (E2E) panel — used by the "Re-enter password"
+  // action on undecryptable messages.
+  const openE2ESettings = useCallback(() => {
+    setSettingsTab("security");
+    setShowSettings(true);
+  }, []);
+
   // Foreground resume counter — triggers message reload when app returns from background
   const [foregroundResumeCount, setForegroundResumeCount] = useState(0);
 
@@ -517,10 +524,10 @@ export default function App() {
                      return { ...m, text: plaintext, isEncryptedLocked: false };
                 } catch (err) {
                     console.warn(`Failed to decrypt message ${m.id}`, err);
-                    return { ...m, isEncryptedLocked: true };
+                    return { ...m, text: "", isEncryptedLocked: true, decryptionError: true };
                 }
             } else if (m.encrypted) {
-                return { ...m, isEncryptedLocked: true };
+                return { ...m, text: "", isEncryptedLocked: true, decryptionError: true };
             }
             return m;
         }));
@@ -694,6 +701,7 @@ export default function App() {
             runId: msg.runId as string,
             sessionKey: sessionKey ?? "",
             text: msg.text as string,
+            decryptionError: !!msg.decryptionError,
           });
           break;
 
@@ -743,6 +751,7 @@ export default function App() {
             timestamp: Date.now(),
             threadId,
             encrypted: !!msg.encrypted,
+            decryptionError: !!msg.decryptionError,
             ...(agentId ? {
               senderAgentId: agentId,
               senderAgentName: stateRef.current.v2Agents.find((a) => a.id === agentId)?.name ?? agentId,
@@ -766,6 +775,7 @@ export default function App() {
             timestamp: Date.now(),
             threadId,
             encrypted: !!msg.encrypted,
+            decryptionError: !!msg.decryptionError,
             mediaEncrypted: !!msg.mediaEncrypted,
           };
           if (threadId && sessionKey) {
@@ -1147,7 +1157,7 @@ export default function App() {
 
                         {/* ChatWindow — main area */}
                         <Panel id="chat">
-                          <ChatWindow sendMessage={sendMessage} />
+                          <ChatWindow sendMessage={sendMessage} onOpenE2ESettings={openE2ESettings} />
                         </Panel>
 
                         {/* ThreadPanel — conditional */}

@@ -25,6 +25,12 @@ export class BotsChatWSClient {
   private backoffMs = 1000;
   private intentionalClose = false;
   private _connected = false;
+  /** Resolves once the E2E key has been (re)loaded after auth.ok. */
+  private keyReady: Promise<void> | null = null;
+  /** Resolver for keyReady (set in connect, called in the auth.ok handler). */
+  private keyReadyResolve: (() => void) | null = null;
+  /** True once the post-auth.ok key load has completed for this connection. */
+  private keyReadyDone = false;
 
   constructor(private opts: WSClientOptions) {}
 
@@ -34,6 +40,13 @@ export class BotsChatWSClient {
 
   connect(): void {
     this.intentionalClose = false;
+    this.keyReadyDone = false;
+    // Deferred that resolves once auth.ok has (re)loaded the E2E key for this
+    // connection. Encrypted messages arriving in the pre-auth.ok window await
+    // it so they never decrypt with a stale (wrong-user) cached key.
+    this.keyReady = new Promise<void>((resolve) => {
+      this.keyReadyResolve = resolve;
+    });
 
     // In native apps (Capacitor or macOS), the WebView runs from a custom
     // scheme so we must use the full production WebSocket URL.
@@ -64,94 +77,7 @@ export class BotsChatWSClient {
     this.ws.onmessage = async (evt) => {
       try {
         const msg = JSON.parse(evt.data) as WSMessage;
-        
-        // Handle E2E Decryption
-        console.log(`[E2E-WS] msg.type=${msg.type} encrypted=${msg.encrypted} hasKey=${E2eService.hasKey()} messageId=${msg.messageId}`);
-        if (msg.encrypted && E2eService.hasKey()) {
-           try {
-             if (msg.type === "agent.text" || msg.type === "agent.media") {
-                // Decrypt text/caption
-                const text = msg.text as string | undefined;
-                const caption = msg.caption as string | undefined;
-                const messageId = msg.messageId as string;
-                
-                if (text && messageId) {
-                    msg.text = await E2eService.decrypt(text, messageId);
-                    msg.encrypted = false;
-                }
-                if (caption && messageId) {
-                    msg.caption = await E2eService.decrypt(caption, messageId);
-                     msg.encrypted = false;
-                }
-             } else if (msg.type === "job.update") {
-                const summary = msg.summary as string;
-                 // Job ID is contextId
-                const jobId = msg.jobId as string;
-                if (summary && jobId) {
-                    msg.summary = await E2eService.decrypt(summary, jobId);
-                    msg.encrypted = false;
-                }
-             }
-           } catch (err) {
-               dlog.warn("E2E", "Decryption failed", err);
-               msg.decryptionError = true;
-           }
-        }
-
-        // Decrypt agent.stream.chunk (E2E streaming support)
-        if (msg.type === "agent.stream.chunk" && msg.encrypted && msg.chunkId && E2eService.hasKey()) {
-          try {
-            msg.text = await E2eService.decrypt(msg.text as string, msg.chunkId as string);
-            msg.encrypted = false;
-          } catch (err) {
-            dlog.warn("E2E", "Stream chunk decryption failed", err);
-          }
-        }
-
-        // Decrypt agent.activity
-        if (msg.type === "agent.activity" && msg.encrypted && msg.activityId && E2eService.hasKey()) {
-          try {
-            msg.text = await E2eService.decrypt(msg.text as string, msg.activityId as string);
-            msg.encrypted = false;
-          } catch (err) {
-            dlog.warn("E2E", "Activity decryption failed", err);
-          }
-        }
-
-        // Handle Task Scan Results (array items)
-        if (msg.type === "task.scan.result" && Array.isArray(msg.tasks) && E2eService.hasKey()) {
-            for (const t of msg.tasks) {
-                if (t.encrypted && t.iv) {
-                    try {
-                        if (t.schedule) t.schedule = await E2eService.decrypt(t.schedule, t.iv);
-                        if (t.instructions) t.instructions = await E2eService.decrypt(t.instructions, t.iv);
-                        t.encrypted = false;
-                    } catch (err) {
-                         dlog.warn("E2E", `Task decryption failed for ${t.cronJobId}`, err);
-                         t.decryptionError = true;
-                    }
-                }
-            }
-        }
-
-        if (msg.type === "auth.ok") {
-          dlog.info("WS", "Auth OK — connected");
-          
-          // Try to load E2E password
-          const userId = msg.userId as string;
-          console.log(`[E2E-WS] auth.ok userId=${userId}, hasSavedPwd=${E2eService.hasSavedPassword()}`);
-          if (userId && E2eService.hasSavedPassword()) {
-              const loaded = await E2eService.loadSavedPassword(userId);
-              console.log(`[E2E-WS] loadSavedPassword result=${loaded}, hasKey=${E2eService.hasKey()}`);
-          }
-          
-          this.backoffMs = 1000;
-          this._connected = true;
-          this.opts.onStatusChange(true);
-          this.opts.onMessage(msg);
-        } else {
-          this.opts.onMessage(msg);
-        }
+        await this.processMessage(msg);
       } catch (err) {
         dlog.warn("WS", "Failed to process incoming message", err);
       }
@@ -188,28 +114,160 @@ export class BotsChatWSClient {
     };
   }
 
+  /**
+   * Parse, decrypt, and dispatch a single inbound message.
+   * Encrypted payloads wait for the E2E key to be loaded+validated for the
+   * current user (native async restore / first PBKDF2 / stale-cache re-derive)
+   * so ciphertext is never rendered as mojibake. Any decryption failure is
+   * surfaced as a graceful "couldn't decrypt" state instead.
+   */
+  private async processMessage(msg: WSMessage): Promise<void> {
+    if (msg.encrypted && !this.keyReadyDone && this.keyReady) {
+      try {
+        await this.keyReady;
+      } catch {
+        /* loadKeyForUser swallows its own errors */
+      }
+    }
+
+    // Encrypted but no usable key (user has no E2E password, or it failed to
+    // load) → graceful locked state, never raw ciphertext.
+    if (msg.encrypted && !E2eService.hasKey()) {
+      this.markDecryptionError(msg);
+    }
+
+    // Attempt E2E decryption when we have a key.
+    if (msg.encrypted && E2eService.hasKey()) {
+      try {
+        if (msg.type === "agent.text" || msg.type === "agent.media") {
+          const text = msg.text as string | undefined;
+          const caption = msg.caption as string | undefined;
+          const messageId = msg.messageId as string;
+          if (text && messageId) {
+            msg.text = await E2eService.decrypt(text, messageId);
+            msg.encrypted = false;
+          }
+          if (caption && messageId) {
+            msg.caption = await E2eService.decrypt(caption, messageId);
+            msg.encrypted = false;
+          }
+        } else if (msg.type === "job.update") {
+          const summary = msg.summary as string;
+          // Job ID is contextId
+          const jobId = msg.jobId as string;
+          if (summary && jobId) {
+            msg.summary = await E2eService.decrypt(summary, jobId);
+            msg.encrypted = false;
+          }
+        }
+      } catch (err) {
+        dlog.warn("E2E", "Decryption failed", err);
+        this.markDecryptionError(msg);
+      }
+    }
+
+    // Decrypt agent.stream.chunk (E2E streaming support)
+    if (msg.type === "agent.stream.chunk" && msg.encrypted && msg.chunkId && E2eService.hasKey()) {
+      try {
+        msg.text = await E2eService.decrypt(msg.text as string, msg.chunkId as string);
+        msg.encrypted = false;
+      } catch (err) {
+        dlog.warn("E2E", "Stream chunk decryption failed", err);
+        this.markDecryptionError(msg);
+      }
+    }
+
+    // Decrypt agent.activity
+    if (msg.type === "agent.activity" && msg.encrypted && msg.activityId && E2eService.hasKey()) {
+      try {
+        msg.text = await E2eService.decrypt(msg.text as string, msg.activityId as string);
+        msg.encrypted = false;
+      } catch (err) {
+        dlog.warn("E2E", "Activity decryption failed", err);
+        this.markDecryptionError(msg);
+      }
+    }
+
+    // Handle Task Scan Results (array items)
+    if (msg.type === "task.scan.result" && Array.isArray(msg.tasks) && E2eService.hasKey()) {
+      for (const t of msg.tasks) {
+        if (t.encrypted && t.iv) {
+          try {
+            if (t.schedule) t.schedule = await E2eService.decrypt(t.schedule, t.iv);
+            if (t.instructions) t.instructions = await E2eService.decrypt(t.instructions, t.iv);
+            t.encrypted = false;
+          } catch (err) {
+            dlog.warn("E2E", `Task decryption failed for ${t.cronJobId}`, err);
+            t.decryptionError = true;
+          }
+        }
+      }
+    }
+
+    if (msg.type === "auth.ok") {
+      dlog.info("WS", "Auth OK — connected");
+      // (Re)load the E2E key for this user (async on native / first PBKDF2).
+      const userId = msg.userId as string;
+      await this.loadKeyForUser(userId);
+      // Release any encrypted messages that were waiting for the key.
+      if (this.keyReadyResolve) {
+        this.keyReadyResolve();
+        this.keyReadyResolve = null;
+      }
+      this.keyReadyDone = true;
+      this.backoffMs = 1000;
+      this._connected = true;
+      this.opts.onStatusChange(true);
+      this.opts.onMessage(msg);
+    } else {
+      this.opts.onMessage(msg);
+    }
+  }
+
+  /** Load the saved E2E key for the user (validates the cache, re-derives if stale). */
+  private async loadKeyForUser(userId: string | undefined): Promise<void> {
+    try {
+      if (userId) {
+        await E2eService.loadSavedPassword(userId);
+      }
+    } catch (err) {
+      dlog.warn("E2E", "loadSavedPassword failed", err);
+    }
+  }
+
+  /**
+   * Mark a message as undecryptable and strip any ciphertext so it never
+   * renders as mojibake — the UI shows a "couldn't decrypt" state instead.
+   */
+  private markDecryptionError(msg: WSMessage): void {
+    msg.decryptionError = true;
+    if (typeof msg.text === "string") msg.text = "";
+    if (typeof msg.caption === "string") msg.caption = "";
+    if (typeof msg.summary === "string") msg.summary = "";
+  }
+
   async send(msg: WSMessage): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) {
       // E2E Encryption for user messages
       if (msg.type === "user.message" && E2eService.hasKey() && typeof msg.text === "string") {
-          try {
-              // Use the existing messageId as contextId for encryption nonce,
-              // so decryption on the plugin side uses the same ID.
-              const existingId = (msg.messageId as string) || undefined;
-              const { ciphertext, messageId } = await E2eService.encrypt(msg.text, existingId);
-              msg.text = ciphertext;
-              // Only set messageId if we didn't have one — preserve the original
-              // so message IDs stay consistent between local state and server.
-              if (!existingId) {
-                msg.messageId = messageId;
-              }
-              msg.encrypted = true;
-          } catch (err) {
-              dlog.error("E2E", "Encryption failed", err);
-              return; 
+        try {
+          // Use the existing messageId as contextId for encryption nonce,
+          // so decryption on the plugin side uses the same ID.
+          const existingId = (msg.messageId as string) || undefined;
+          const { ciphertext, messageId } = await E2eService.encrypt(msg.text, existingId);
+          msg.text = ciphertext;
+          // Only set messageId if we didn't have one — preserve the original
+          // so message IDs stay consistent between local state and server.
+          if (!existingId) {
+            msg.messageId = messageId;
           }
+          msg.encrypted = true;
+        } catch (err) {
+          dlog.error("E2E", "Encryption failed", err);
+          return;
+        }
       }
-      
+
       this.ws.send(JSON.stringify(msg));
     } else {
       dlog.warn("WS", `Cannot send — socket not open (readyState=${this.ws?.readyState})`, msg);

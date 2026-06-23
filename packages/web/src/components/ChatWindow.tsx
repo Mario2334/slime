@@ -12,6 +12,8 @@ import { formatMessageTime, formatFullDateTime } from "../utils/time";
 
 type ChatWindowProps = {
   sendMessage: (msg: WSMessage) => void;
+  /** Opens the E2E settings (desktop: Security tab; mobile: settings modal). */
+  onOpenE2ESettings?: () => void;
 };
 
 /** Simple string hash for action prompt keys (matches MessageContent) */
@@ -155,7 +157,7 @@ function getSortedSkills(): { skills: Skill[]; store: SkillStore } {
 }
 
 /** Flat-row message display + composer, per design guideline section 5.2/5.6 */
-export function ChatWindow({ sendMessage }: ChatWindowProps) {
+export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const isMobile = useIsMobile();
@@ -469,6 +471,10 @@ export function ChatWindow({ sendMessage }: ChatWindowProps) {
 
     dispatch({ type: "ADD_MESSAGE", message: msg });
 
+    // Show a "typing" placeholder while we wait for the agent's first byte.
+    // Covers non-streaming replies; cleared by STREAM_START / the reply itself.
+    dispatch({ type: "START_PENDING", sessionKey });
+
     sendMessage({
       type: "user.message",
       sessionKey,
@@ -778,9 +784,13 @@ export function ChatWindow({ sendMessage }: ChatWindowProps) {
               onAction={handleA2UIAction}
               onResolveAction={(value, label) => handleResolveAction(msg.id, value, label)}
               onStop={handleStop}
+              onOpenE2ESettings={onOpenE2ESettings}
             />
           );
         })}
+        {state.pendingSessionKey && state.pendingSessionKey === state.selectedSessionKey && (
+          <TypingBubble />
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -970,7 +980,7 @@ export function ChatWindow({ sendMessage }: ChatWindowProps) {
 }
 
 /** Collapsible panel showing agent thinking and tool call activity */
-function ActivityPanel({ activities }: { activities: ActivityItem[] }) {
+function ActivityPanel({ activities, isActive }: { activities: ActivityItem[]; isActive?: boolean }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   if (!activities || activities.length === 0) return null;
@@ -1022,10 +1032,10 @@ function ActivityPanel({ activities }: { activities: ActivityItem[] }) {
             className="flex items-center gap-1.5 py-0.5 px-1 -ml-1 rounded hover:bg-[--bg-hover] transition-colors cursor-pointer text-left w-full"
           >
             <span className="text-[10px] opacity-60">{expanded.has("reasoning") ? "▾" : "▸"}</span>
-            <svg className="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+            <svg className={`w-3 h-3 opacity-50 ${isActive ? "animate-pulse" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
             </svg>
-            <span className="opacity-70">Thinking…</span>
+            <span className="opacity-70">{isActive ? "Thinking…" : "Thought process"}</span>
           </button>
           {expanded.has("reasoning") && (
             <div
@@ -1084,6 +1094,74 @@ function ActivityPanel({ activities }: { activities: ActivityItem[] }) {
   );
 }
 
+/**
+ * "Agent is typing…" placeholder — shown while waiting for the agent's first
+ * byte (non-streaming replies). Derived from `pendingSessionKey`, never stored
+ * as a message, so it can never collide with the streaming placeholder.
+ */
+function TypingBubble() {
+  const state = useAppState();
+  const sk = state.selectedSessionKey ?? "";
+  const match = sk.match(/^agent:([^:]+):/);
+  const name = state.v2Agents.find((a) => a.id === match?.[1])?.name ?? "Agent";
+  return (
+    <div className="relative px-3 sm:px-5" style={{ paddingTop: 8, paddingBottom: 2 }}>
+      <div className="flex gap-2 max-w-message">
+        <div className="flex-shrink-0" style={{ width: 36 }}>
+          <div
+            className="w-9 h-9 rounded flex items-center justify-center text-white text-caption font-bold"
+            style={{ background: "#2BAC76" }}
+          >
+            {name[0]?.toUpperCase() ?? "A"}
+          </div>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 mb-0.5">
+            <span className="text-h2" style={{ color: "var(--text-primary)" }}>{name}</span>
+          </div>
+          <div className="flex items-center gap-1 py-1">
+            <span className="inline-block w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--text-muted)", animationDelay: "0ms" }} />
+            <span className="inline-block w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--text-muted)", animationDelay: "150ms" }} />
+            <span className="inline-block w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--text-muted)", animationDelay: "300ms" }} />
+            <span className="text-caption ml-1.5" style={{ color: "var(--text-muted)" }}>thinking…</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Fallback block for messages that could not be E2E-decrypted (no mojibake). */
+function DecryptionLockedBlock({ onReEnter }: { onReEnter?: () => void }) {
+  return (
+    <div
+      className="mt-1 px-3 py-2 rounded-md flex items-center gap-2 text-caption"
+      style={{ background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text-secondary)" }}
+    >
+      <svg
+        className="w-4 h-4 flex-shrink-0"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={1.8}
+        style={{ color: "var(--accent-yellow, #d69e2e)" }}
+      >
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+      <span className="flex-1">Encrypted — couldn't decrypt (E2E key mismatch).</span>
+      {onReEnter && (
+        <button
+          onClick={onReEnter}
+          className="px-2 py-0.5 rounded font-bold transition-colors flex-shrink-0"
+          style={{ background: "var(--bg-active, #6366f1)", color: "#fff" }}
+        >
+          Re-enter password
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** Flat-row message item (section 5.2) */
 function MessageRow({
   msg,
@@ -1094,6 +1172,7 @@ function MessageRow({
   onAction,
   onResolveAction,
   onStop,
+  onOpenE2ESettings,
 }: {
   msg: ChatMessage;
   grouped: boolean;
@@ -1103,6 +1182,7 @@ function MessageRow({
   onAction?: (action: string) => void;
   onResolveAction?: (value: string, label: string) => void;
   onStop?: () => void;
+  onOpenE2ESettings?: () => void;
 }) {
   const state = useAppState();
   const agentName = msg.senderAgentName ?? "Agent";
@@ -1180,8 +1260,12 @@ function MessageRow({
               </span>
             </div>
           )}
+          {msg.decryptionError || msg.isEncryptedLocked ? (
+            <DecryptionLockedBlock onReEnter={onOpenE2ESettings} />
+          ) : (
+            <>
           {msg.activities && msg.activities.length > 0 && (
-            <ActivityPanel activities={msg.activities} />
+            <ActivityPanel activities={msg.activities} isActive={!!msg.isStreaming} />
           )}
           <MessageContent
             text={msg.text}
@@ -1228,6 +1312,8 @@ function MessageRow({
                 </button>
               )}
             </div>
+          )}
+            </>
           )}
 
           {/* Thread bar – shown when this message has thread replies */}

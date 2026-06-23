@@ -168,7 +168,7 @@ do_start_full() {
   local PAT
   PAT=$(get_mock_token)
   mkdir -p "$ROOT/.wrangler"
-  node "$ROOT/scripts/mock-openclaw.mjs" --token "$PAT" > "$ROOT/.wrangler/mock-openclaw.log" 2>&1 &
+  node "$ROOT/scripts/mock-openclaw.mjs" --token "$PAT" --stream > "$ROOT/.wrangler/mock-openclaw.log" 2>&1 &
   MOCK_PID=$!
   ok "Mock OpenClaw connected (pid=$MOCK_PID)"
 

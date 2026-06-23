@@ -15,6 +15,8 @@ export type ChatMessage = {
   /** Tracks which action blocks have been resolved, keyed by prompt hash */
   resolvedActions?: Record<string, { value: string; label: string }>;
   isEncryptedLocked?: boolean;
+  /** True when an encrypted message could not be decrypted (wrong/missing E2E key). */
+  decryptionError?: boolean;
   /** Whether the message text was E2E encrypted (bitmask from API: bit0=text, bit1=media) */
   encrypted?: boolean | number;
   /** Whether the media binary was E2E encrypted (derived from sender + encrypted flag) */
@@ -68,6 +70,11 @@ export type AppState = {
   streamingRunId: string | null;
   streamingSessionKey: string | null;
   streamingThreadId: string | null; // non-null when streaming into a thread
+  // "Agent is typing…" placeholder — non-null sessionKey while waiting for the
+  // first byte of a reply (covers non-streaming replies). Superseded by
+  // STREAM_START / cleared when the agent reply arrives.
+  pendingSessionKey: string | null;
+  pendingThreadId: string | null;
   // Automations view state
   cronTasks: TaskWithChannel[];
   selectedCronTaskId: string | null;
@@ -103,6 +110,8 @@ export const initialState: AppState = {
   streamingRunId: null,
   streamingSessionKey: null,
   streamingThreadId: null,
+  pendingSessionKey: null,
+  pendingThreadId: null,
   cronTasks: [],
   selectedCronTaskId: null,
   cronJobs: [],
@@ -142,9 +151,11 @@ export type AppAction =
   | { type: "SELECT_CRON_TASK"; taskId: string | null }
   | { type: "RESOLVE_ACTION"; messageId: string; promptHash: string; value: string; label: string }
   | { type: "STREAM_START"; runId: string; sessionKey: string; threadId?: string }
-  | { type: "STREAM_CHUNK"; runId: string; sessionKey: string; text: string }
+  | { type: "STREAM_CHUNK"; runId: string; sessionKey: string; text: string; decryptionError?: boolean }
   | { type: "STREAM_END"; runId: string }
   | { type: "STREAM_ACTIVITY"; runId: string; sessionKey: string; activity: ActivityItem }
+  | { type: "START_PENDING"; sessionKey: string; threadId?: string }
+  | { type: "CLEAR_PENDING" }
   | { type: "SET_CRON_JOBS"; cronJobs: Job[] }
   | { type: "SELECT_CRON_JOB"; jobId: string | null; sessionKey?: string | null }
   | { type: "ADD_CRON_JOB"; job: Job }
@@ -250,18 +261,31 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       // arrive *before* agent.stream.end (deliver() fires first inside
       // dispatchReplyFromConfig, stream.end is sent after it returns).
       const lastMsg = state.messages[state.messages.length - 1];
+      const isAgentReply = action.message.sender === "agent";
       if (
-        action.message.sender === "agent" &&
+        isAgentReply &&
         lastMsg?.isStreaming
       ) {
         return {
           ...state,
           streamingRunId: null,
           streamingSessionKey: null,
+          // The reply arrived — clear the "typing" placeholder.
+          pendingSessionKey: null,
+          pendingThreadId: null,
           messages: [
             ...state.messages.slice(0, -1),
             { ...action.message, isStreaming: false, activities: lastMsg.activities },
           ],
+        };
+      }
+      // A non-streamed agent reply (no placeholder) also ends the typing state.
+      if (isAgentReply) {
+        return {
+          ...state,
+          pendingSessionKey: null,
+          pendingThreadId: null,
+          messages: [...state.messages, action.message],
         };
       }
       return { ...state, messages: [...state.messages, action.message] };
@@ -312,7 +336,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             ...state.threadMessages.slice(0, -1),
             { ...action.message, isStreaming: false, activities: lastMsg.activities },
           ];
-          clearStreaming = { streamingRunId: null, streamingSessionKey: null, streamingThreadId: null };
+          clearStreaming = { streamingRunId: null, streamingSessionKey: null, streamingThreadId: null, pendingSessionKey: null, pendingThreadId: null };
         } else {
           newThreadMessages = [...state.threadMessages, action.message];
         }
@@ -378,32 +402,60 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         isStreaming: true,
       };
       const isThreadStream = !!action.threadId;
+      // Replace any existing streaming placeholder rather than appending a
+      // second one — e.g. when agent.activity (with an empty/synthetic runId)
+      // synthesized a placeholder before the real agent.stream.start arrived.
+      // Otherwise the orphaned placeholder would never be cleaned up by
+      // ADD_MESSAGE (which only replaces the LAST message).
+      const list = isThreadStream ? state.threadMessages : state.messages;
+      const existingIdx = list.findIndex((m) => m.isStreaming);
+      const nextList: ChatMessage[] =
+        existingIdx >= 0
+          ? list.map((m, i) => (i === existingIdx ? streamMsg : m))
+          : [...list, streamMsg];
       return {
         ...state,
         streamingRunId: action.runId,
         streamingSessionKey: action.sessionKey,
         streamingThreadId: action.threadId ?? null,
+        // The streaming placeholder supersedes the "typing" placeholder.
+        pendingSessionKey: null,
+        pendingThreadId: null,
         ...(isThreadStream
-          ? { threadMessages: [...state.threadMessages, streamMsg] }
-          : { messages: [...state.messages, streamMsg] }),
+          ? { threadMessages: nextList }
+          : { messages: nextList }),
       };
     }
+    case "START_PENDING":
+      return {
+        ...state,
+        pendingSessionKey: action.sessionKey,
+        pendingThreadId: action.threadId ?? null,
+      };
+    case "CLEAR_PENDING":
+      return { ...state, pendingSessionKey: null, pendingThreadId: null };
     case "STREAM_CHUNK": {
       if (state.streamingRunId !== action.runId) return state;
       // Update the streaming message's text (onPartialReply sends accumulated text)
       const streamId = `stream_${action.runId}`;
+      const patch = (m: ChatMessage): ChatMessage => ({
+        ...m,
+        text: action.text,
+        // Propagate decrypt failures so the placeholder shows the locked block.
+        decryptionError: !!action.decryptionError || undefined,
+      });
       if (state.streamingThreadId) {
         return {
           ...state,
           threadMessages: state.threadMessages.map((m) =>
-            m.id === streamId ? { ...m, text: action.text } : m,
+            m.id === streamId ? patch(m) : m,
           ),
         };
       }
       return {
         ...state,
         messages: state.messages.map((m) =>
-          m.id === streamId ? { ...m, text: action.text } : m,
+          m.id === streamId ? patch(m) : m,
         ),
       };
     }
