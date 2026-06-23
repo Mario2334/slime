@@ -40,6 +40,8 @@ export class ConnectionDO implements DurableObject {
   private defaultModel: string | null = null;
   /** Cached models list from OpenClaw plugin */
   private cachedModels: Array<{ id: string; name: string; provider: string }> = [];
+  /** Cached skills list from OpenClaw plugin (drives the slash-command menu) */
+  private cachedSkills: Array<{ id: string; cmd: string; label: string; description?: string; icon?: string }> = [];
 
   /** Pending resolve for a real-time task.scan.request → task.scan.result round-trip. */
   private pendingScanResolve: ((tasks: Array<Record<string, unknown>>) => void) | null = null;
@@ -111,6 +113,12 @@ export class ConnectionDO implements DurableObject {
       await this.ensureCachedModels();
       console.log(`[DO] GET /models — returning ${this.cachedModels.length} models`);
       return Response.json({ models: this.cachedModels });
+    }
+
+    // Route: /skills — Available OpenClaw skills (REST, cache-only)
+    if (url.pathname === "/skills") {
+      await this.ensureCachedSkills();
+      return Response.json({ skills: this.cachedSkills });
     }
 
     // Route: /scan-data — Cached OpenClaw scan data (schedule/instructions/model)
@@ -300,15 +308,16 @@ export class ConnectionDO implements DurableObject {
           this.defaultModel = msg.model as string;
           await this.state.storage.put("defaultModel", this.defaultModel);
         }
-        // After auth, request task scan + models list from the plugin
+        // After auth, request task scan + models + skills from the plugin
         ws.send(JSON.stringify({ type: "task.scan.request" }));
         ws.send(JSON.stringify({ type: "models.request" }));
+        ws.send(JSON.stringify({ type: "skills.request" }));
         // Send notification preview preference to plugin
         const notifyPreview = await this.getNotifyPreviewSetting(userId);
         ws.send(JSON.stringify({ type: "settings.notifyPreview", enabled: notifyPreview }));
         // Notify all browser clients that OpenClaw is now connected
         this.broadcastToBrowsers(
-          JSON.stringify({ type: "connection.status", openclawConnected: true, defaultModel: this.defaultModel, models: this.cachedModels }),
+          JSON.stringify({ type: "connection.status", openclawConnected: true, defaultModel: this.defaultModel, models: this.cachedModels, skills: this.cachedSkills }),
         );
       } else {
         ws.send(JSON.stringify({ type: "auth.fail", reason: "Invalid pairing token" }));
@@ -405,7 +414,20 @@ export class ConnectionDO implements DurableObject {
         console.log(`[DO] Persisted ${this.cachedModels.length} models to storage`);
       }
       this.broadcastToBrowsers(
-        JSON.stringify({ type: "connection.status", openclawConnected: true, defaultModel: this.defaultModel, models: this.cachedModels }),
+        JSON.stringify({ type: "connection.status", openclawConnected: true, defaultModel: this.defaultModel, models: this.cachedModels, skills: this.cachedSkills }),
+      );
+    }
+
+    if (msg.type === "skills.list") {
+      const newSkills = (msg.skills as Array<{ id: string; cmd: string; label: string; description?: string; icon?: string }>) ?? [];
+      const changed = JSON.stringify(newSkills) !== JSON.stringify(this.cachedSkills);
+      this.cachedSkills = newSkills;
+      if (changed) {
+        await this.state.storage.put("cachedSkills", this.cachedSkills);
+        console.log(`[DO] Persisted ${this.cachedSkills.length} skills to storage`);
+      }
+      this.broadcastToBrowsers(
+        JSON.stringify({ type: "connection.status", openclawConnected: true, defaultModel: this.defaultModel, models: this.cachedModels, skills: this.cachedSkills }),
       );
     }
 
@@ -415,7 +437,7 @@ export class ConnectionDO implements DurableObject {
         await this.state.storage.put("defaultModel", this.defaultModel);
       }
       this.broadcastToBrowsers(
-        JSON.stringify({ type: "connection.status", openclawConnected: true, defaultModel: this.defaultModel, models: this.cachedModels }),
+        JSON.stringify({ type: "connection.status", openclawConnected: true, defaultModel: this.defaultModel, models: this.cachedModels, skills: this.cachedSkills }),
       );
     }
 
@@ -535,6 +557,7 @@ export class ConnectionDO implements DurableObject {
 
       // Send current connection status + cached models
       await this.ensureCachedModels();
+      await this.ensureCachedSkills();
       const openclawConnected = this.getOpenClawSocket() !== null;
       ws.send(
         JSON.stringify({
@@ -542,6 +565,7 @@ export class ConnectionDO implements DurableObject {
           openclawConnected,
           defaultModel: this.defaultModel,
           models: this.cachedModels,
+          skills: this.cachedSkills,
           connectedAgents: availableAgents.filter((a) => a.status === "connected"),
         }),
       );
@@ -776,6 +800,15 @@ export class ConnectionDO implements DurableObject {
     if (!this.defaultModel) {
       const storedModel = await this.state.storage.get<string>("defaultModel");
       if (storedModel) this.defaultModel = storedModel;
+    }
+  }
+
+  /** Restore cachedSkills from durable storage if in-memory cache is empty. */
+  private async ensureCachedSkills(): Promise<void> {
+    if (this.cachedSkills.length > 0) return;
+    const stored = await this.state.storage.get<Array<{ id: string; cmd: string; label: string; description?: string; icon?: string }>>("cachedSkills");
+    if (stored && stored.length > 0) {
+      this.cachedSkills = stored;
     }
   }
 

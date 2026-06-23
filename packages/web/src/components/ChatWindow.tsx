@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from "react";
 import { useAppState, useAppDispatch, type ChatMessage, type ActivityItem } from "../store";
+import type { SkillInfo } from "../api";
 import type { WSMessage } from "../ws";
 import { MessageContent } from "./MessageContent";
 import { SessionTabs } from "./SessionTabs";
@@ -141,23 +142,39 @@ function skillScore(entry: SkillEntry): number {
  * Return default skills + user-typed custom skills, sorted by a composite
  * recency score (skills used more in the last 2 days float to the front).
  */
-function getSortedSkills(): { skills: Skill[]; store: SkillStore } {
+/** Map a fetched SkillInfo to the local Skill shape, deriving label/icon from cmd. */
+function toSkill(s: SkillInfo): Skill {
+  const name = s.cmd.replace(/^\//, "");
+  const fallbackLabel = name.charAt(0).toUpperCase() + name.slice(1);
+  return {
+    cmd: s.cmd,
+    label: s.label || fallbackLabel,
+    icon: s.icon || name.charAt(0).toUpperCase() || "?",
+  };
+}
+
+/**
+ * Return the agent's fetched skills (+ recency-sorted custom skills typed by the
+ * user), falling back to DEFAULT_SKILLS when the agent hasn't reported any
+ * (pre-connect, offline, older plugin, or none installed).
+ */
+function getSortedSkills(fetched: SkillInfo[]): Skill[] {
   const store = loadSkillStore();
-  const defaultCmds = new Set(DEFAULT_SKILLS.map((s) => s.cmd));
-  // Build entries for user-typed skills that aren't in the default list
+  const base = fetched.length > 0 ? fetched.map(toSkill) : DEFAULT_SKILLS;
+  const baseCmds = new Set(base.map((s) => s.cmd));
+  // Build entries for user-typed skills that aren't in the base list
   const customSkills: Skill[] = Object.keys(store)
-    .filter((cmd) => !defaultCmds.has(cmd) && cmd.startsWith("/"))
+    .filter((cmd) => !baseCmds.has(cmd) && cmd.startsWith("/"))
     .map((cmd) => ({
       cmd,
       label: cmd.slice(1).charAt(0).toUpperCase() + cmd.slice(2),
       icon: cmd.slice(1).charAt(0).toUpperCase(),
     }));
-  const skills = [...DEFAULT_SKILLS, ...customSkills].sort((a, b) => {
+  return [...base, ...customSkills].sort((a, b) => {
     const sa = store[a.cmd] ? skillScore(store[a.cmd]) : 0;
     const sb = store[b.cmd] ? skillScore(store[b.cmd]) : 0;
     return sb - sa;
   });
-  return { skills, store };
 }
 
 /**
@@ -228,9 +245,9 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
 
   const sessionKey = state.selectedSessionKey;
 
-  const { skills: sortedSkills } = useMemo(
-    () => getSortedSkills(),
-    [skillVersion],
+  const sortedSkills = useMemo(
+    () => getSortedSkills(state.skills),
+    [skillVersion, state.skills],
   );
 
   // The slash token currently being typed (active only at message start) and the

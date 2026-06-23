@@ -228,6 +228,15 @@ function handleMessage(msg) {
     case "models.request":
       send({ type: "models.list", models: [{ id: MODEL, name: "Mock OpenClaw v2", provider: "mock" }] });
       break;
+    case "skills.request":
+      send({
+        type: "skills.list",
+        skills: [
+          { id: "mock-echo", cmd: "/echo", label: "Echo", description: "Echo your text back" },
+          { id: "mock-joke", cmd: "/joke", label: "Joke", description: "Tell a joke" },
+        ],
+      });
+      break;
     case "settings.defaultModel":
       send({ type: "defaultModel.updated", model: msg.defaultModel });
       break;

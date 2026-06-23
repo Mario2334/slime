@@ -164,6 +164,19 @@ export const modelsApi = {
   list: () => request<{ models: ModelInfo[] }>("GET", "/models"),
 };
 
+// ---- Skills (OpenClaw slash-command skills) ----
+export type SkillInfo = {
+  id: string;
+  cmd: string; // includes the leading '/'
+  label: string;
+  description?: string;
+  icon?: string;
+};
+
+export const skillsApi = {
+  list: () => request<{ skills: SkillInfo[] }>("GET", "/skills"),
+};
+
 // ---- Agents (OpenClaw-aligned: first level = Agent, then Session) ----
 export type Agent = {
   id: string;

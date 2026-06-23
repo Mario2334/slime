@@ -241,6 +241,19 @@ function handleMessage(msg) {
       logSend(`[models.list] ${MOCK_MODELS.length} models`);
       break;
 
+    case "skills.request":
+      logRecv("[skills.request]");
+      send({
+        type: "skills.list",
+        skills: [
+          { id: "mock-echo", cmd: "/echo", label: "Echo", description: "Echo your text back" },
+          { id: "mock-joke", cmd: "/joke", label: "Joke", description: "Tell a joke" },
+          { id: "mock-whoami", cmd: "/whoami", label: "Whoami", description: "Show your sender id" },
+        ],
+      });
+      logSend("[skills.list] 3 mock skills");
+      break;
+
     case "task.schedule":
       logRecv(`[task.schedule] cronJobId=${msg.cronJobId} schedule=${msg.schedule}`);
       send({

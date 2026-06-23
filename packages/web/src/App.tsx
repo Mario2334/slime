@@ -11,7 +11,7 @@ import {
   type ActiveView,
   type ActivityItem,
 } from "./store";
-import { getToken, setToken, setRefreshToken, agentsApi, channelsApi, tasksApi, jobsApi, authApi, messagesApi, modelsApi, meApi, sessionsApi, type ModelInfo, type AgentV2 } from "./api";
+import { getToken, setToken, setRefreshToken, agentsApi, channelsApi, tasksApi, jobsApi, authApi, messagesApi, modelsApi, skillsApi, meApi, sessionsApi, type ModelInfo, type SkillInfo, type AgentV2 } from "./api";
 import { ModelSelect } from "./components/ModelSelect";
 import { BotsChatWSClient, type WSMessage } from "./ws";
 import { initPushNotifications, getPendingPushNav, clearPendingPushNav, notifyIfBackground } from "./push";
@@ -261,9 +261,14 @@ export default function App() {
           if (models.length > 0) dispatch({ type: "SET_MODELS", models });
         }).catch(() => {});
       }
+      if (state.skills.length === 0) {
+        skillsApi.list().then(({ skills }) => {
+          if (skills.length > 0) dispatch({ type: "SET_SKILLS", skills });
+        }).catch(() => {});
+      }
     }, 2000);
     return () => clearTimeout(timer);
-  }, [state.user, state.models.length]);
+  }, [state.user, state.models.length, state.skills.length]);
 
   // ---- Load agents (default + channel agents) when user is set ----
   useEffect(() => {
@@ -650,6 +655,11 @@ export default function App() {
           if (Array.isArray(msg.models) && msg.models.length > 0) {
             dispatch({ type: "SET_MODELS", models: msg.models as ModelInfo[] });
           }
+          // Skills are delivered alongside connection.status (no length gate:
+          // an agent with zero skills must still clear the stale list)
+          if (Array.isArray(msg.skills)) {
+            dispatch({ type: "SET_SKILLS", skills: msg.skills as SkillInfo[] });
+          }
           const data = msg as unknown as { connectedAgents?: { id: string }[] };
           if (Array.isArray(data.connectedAgents)) {
             for (const agent of data.connectedAgents) {
@@ -922,6 +932,12 @@ export default function App() {
         case "models.list":
           if (Array.isArray(msg.models)) {
             dispatch({ type: "SET_MODELS", models: msg.models as ModelInfo[] });
+          }
+          break;
+
+        case "skills.list":
+          if (Array.isArray(msg.skills)) {
+            dispatch({ type: "SET_SKILLS", skills: msg.skills as SkillInfo[] });
           }
           break;
 

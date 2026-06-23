@@ -1,7 +1,7 @@
 /** Minimal reactive store using React context + useState. */
 
 import { createContext, useContext } from "react";
-import type { Agent as ApiAgent, AgentV2, Channel, Task, TaskWithChannel, Job, ModelInfo, Session } from "./api";
+import type { Agent as ApiAgent, AgentV2, Channel, Task, TaskWithChannel, Job, ModelInfo, SkillInfo, Session } from "./api";
 
 export type ChatMessage = {
   id: string;
@@ -64,6 +64,8 @@ export type AppState = {
   sessionModel: string | null;
   wsConnected: boolean;
   models: ModelInfo[];
+  /** OpenClaw skills (drives the slash-command suggestion menu). */
+  skills: SkillInfo[];
   /** Global default model from OpenClaw config (gateway primary). */
   defaultModel: string | null;
   // Streaming state — tracks in-progress streaming reply
@@ -106,6 +108,7 @@ export const initialState: AppState = {
   sessionModel: null,
   wsConnected: false,
   models: [],
+  skills: [],
   defaultModel: null,
   streamingRunId: null,
   streamingSessionKey: null,
@@ -144,6 +147,7 @@ export type AppAction =
   | { type: "SET_SESSION_MODEL"; model: string | null }
   | { type: "SET_WS_CONNECTED"; connected: boolean }
   | { type: "SET_MODELS"; models: ModelInfo[] }
+  | { type: "SET_SKILLS"; skills: SkillInfo[] }
   | { type: "SET_DEFAULT_MODEL"; model: string | null }
   | { type: "SET_CRON_TASKS"; cronTasks: TaskWithChannel[] }
   | { type: "MERGE_SCAN_DATA"; scanTasks: Array<{ cronJobId: string; schedule: string; instructions: string; model?: string; enabled: boolean }> }
@@ -373,6 +377,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, wsConnected: action.connected };
     case "SET_MODELS":
       return { ...state, models: action.models };
+    case "SET_SKILLS":
+      return { ...state, skills: action.skills };
     case "SET_DEFAULT_MODEL":
       return { ...state, defaultModel: action.model };
     case "RESOLVE_ACTION": {

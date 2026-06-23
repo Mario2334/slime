@@ -12,6 +12,7 @@ import { channels } from "./routes/channels.js";
 import { tasks } from "./routes/tasks.js";
 import { jobs } from "./routes/jobs.js";
 import { models } from "./routes/models.js";
+import { skills } from "./routes/skills.js";
 import { pairing } from "./routes/pairing.js";
 import { sessions } from "./routes/sessions.js";
 import { upload } from "./routes/upload.js";
@@ -102,6 +103,7 @@ protectedApp.route("/v2/migrate", migrateV2);
 protectedApp.route("/v2/messages", historyV2);
 protectedApp.route("/channels", channels);
 protectedApp.route("/models", models);
+protectedApp.route("/skills", skills);
 protectedApp.get("/me", async (c) => {
   // Proxy /api/me to the auth /me handler
   const userId = c.get("userId");
