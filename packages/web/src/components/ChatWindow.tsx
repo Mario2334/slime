@@ -613,7 +613,12 @@ export function ChatWindow({ sendMessage, onOpenE2ESettings }: ChatWindowProps) 
 
     // Show a "typing" placeholder while we wait for the agent's first byte.
     // Covers non-streaming replies; cleared by STREAM_START / the reply itself.
-    dispatch({ type: "START_PENDING", sessionKey });
+    // Slash commands are directives that often produce no chat reply (e.g.
+    // /model, /clear, /reset) — skip the placeholder for them, otherwise it
+    // would spin forever waiting for an agent.text that never arrives.
+    if (!isSkill) {
+      dispatch({ type: "START_PENDING", sessionKey });
+    }
 
     sendMessage({
       type: "user.message",
