@@ -37,10 +37,8 @@ function AppleIcon() {
 
 export function LoginPage() {
   const dispatch = useAppDispatch();
-  const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState<"google" | "github" | "apple" | null>(null);
@@ -49,18 +47,20 @@ export function LoginPage() {
   const firebaseEnabled = isFirebaseConfigured();
   const anyLoading = loading || !!oauthLoading;
 
-  // Fetch server-side auth config to determine which methods are available
+  // Fetch server-side auth config to determine which methods are available.
+  // Custom email/password login is always available; SSO (Google/GitHub/Apple)
+  // is offered as a secondary option when Firebase is configured.
+  const emailEnabled = true;
+
   useEffect(() => {
     authApi.config().then(setAuthConfig).catch(() => {
-      // Fallback: assume email enabled (local dev) if config endpoint fails
+      // Fallback: assume email enabled + SSO per Firebase config if endpoint fails
       setAuthConfig({ emailEnabled: true, googleEnabled: firebaseEnabled, githubEnabled: firebaseEnabled, appleEnabled: firebaseEnabled });
     });
   }, [firebaseEnabled]);
 
-  // Email/password login is permanently disabled — only OAuth (Google/GitHub) is allowed.
-  const emailEnabled = false;
   const configLoaded = authConfig !== null;
-  const hasAnyLoginMethod = configLoaded && (firebaseEnabled || emailEnabled);
+  const hasAnyLoginMethod = configLoaded;
 
   const handleAuthSuccess = (res: { id: string; email: string; displayName?: string; token: string; refreshToken?: string }) => {
     setToken(res.token);
@@ -77,22 +77,13 @@ export function LoginPage() {
     setLoading(true);
 
     try {
-      let res;
-      if (isRegister) {
-        dlog.info("Auth", `Registering new account: ${email}`);
-        res = await authApi.register(email, password, displayName || undefined);
-      } else {
-        dlog.info("Auth", `Logging in: ${email}`);
-        res = await authApi.login(email, password);
-      }
-      dlog.info("Auth", `${isRegister ? "Register" : "Login"} success — user ${res.id} (${res.email})`);
+      dlog.info("Auth", `Logging in: ${email}`);
+      const res = await authApi.login(email, password);
+      dlog.info("Auth", `Login success — user ${res.id} (${res.email})`);
       handleAuthSuccess(res);
-      if (isRegister) {
-        localStorage.setItem("botschat_onboarding_dismissed", "1");
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong";
-      dlog.error("Auth", `${isRegister ? "Register" : "Login"} failed: ${message}`);
+      dlog.error("Auth", `Login failed: ${message}`);
       setError(message);
     } finally {
       setLoading(false);
@@ -139,53 +130,113 @@ export function LoginPage() {
       style={{ background: "var(--bg-secondary)" }}
     >
       <div className="min-h-full flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <img
-            src="/botschat-logo.png"
-            alt="BotsChat"
-            className="inline-block w-16 h-16 mb-4"
-          />
-          <h1 className="text-3xl font-bold" style={{ color: "var(--text-primary)" }}>
-            BotsChat
-          </h1>
-          <p className="mt-2" style={{ color: "var(--text-secondary)" }}>
-            Multi-channel AI chat powered by OpenClaw
-          </p>
-        </div>
+        <div className="w-full max-w-md">
+          {/* Header */}
+          <div className="text-center mb-8">
+            <img
+              src="/botschat-logo.png"
+              alt="BotsChat"
+              className="inline-block w-16 h-16 mb-4"
+            />
+            <h1 className="text-3xl font-bold" style={{ color: "var(--text-primary)" }}>
+              BotsChat
+            </h1>
+            <p className="mt-2" style={{ color: "var(--text-secondary)" }}>
+              Multi-channel AI chat powered by OpenClaw
+            </p>
+          </div>
 
-        {/* Form card */}
-        <div
-          className="rounded-md p-8"
-          style={{
-            background: "var(--bg-surface)",
-            boxShadow: "var(--shadow-lg)",
-          }}
-        >
-          <h2 className="text-h1 mb-6" style={{ color: "var(--text-primary)" }}>
-            {emailEnabled
-              ? (isRegister ? "Create account" : "Sign in")
-              : "Sign in"}
-          </h2>
+          {/* Form card */}
+          <div
+            className="rounded-md p-8"
+            style={{
+              background: "var(--bg-surface)",
+              boxShadow: "var(--shadow-lg)",
+            }}
+          >
+            <h2 className="text-h1 mb-6" style={{ color: "var(--text-primary)" }}>
+              Sign in
+            </h2>
 
-          {/* Loading: avoid showing empty card on first paint before config is loaded */}
-          {!configLoaded && (
-            <div className="py-8 text-center" style={{ color: "var(--text-muted)" }}>
-              <span className="text-body">Loading sign-in options…</span>
-            </div>
-          )}
+            {/* Loading: avoid showing empty card on first paint before config is loaded */}
+            {!configLoaded && (
+              <div className="py-8 text-center" style={{ color: "var(--text-muted)" }}>
+                <span className="text-body">Loading sign-in options…</span>
+              </div>
+            )}
 
-          {/* No methods available (e.g. misconfiguration) */}
-          {configLoaded && !hasAnyLoginMethod && (
-            <div className="py-4 text-caption" style={{ color: "var(--text-secondary)" }}>
-              Sign-in is not configured. Please contact support.
-            </div>
-          )}
+            {/* No methods available (e.g. misconfiguration) */}
+            {configLoaded && !hasAnyLoginMethod && (
+              <div className="py-4 text-caption" style={{ color: "var(--text-secondary)" }}>
+                Sign-in is not configured. Please contact support.
+              </div>
+            )}
 
-          {/* OAuth buttons */}
-          {configLoaded && firebaseEnabled && (
-            <>
+            {/* Email/password form (primary sign-in) */}
+            {configLoaded && emailEnabled && (
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-caption font-bold mb-1" style={{ color: "var(--text-secondary)" }}>
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    className="w-full px-3 py-2.5 text-body rounded-sm focus:outline-none placeholder:text-[--text-muted]"
+                    style={{
+                      background: "var(--bg-surface)",
+                      color: "var(--text-primary)",
+                      border: "1px solid var(--border)",
+                    }}
+                    placeholder="you@example.com"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-caption font-bold mb-1" style={{ color: "var(--text-secondary)" }}>
+                    Password
+                  </label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    className="w-full px-3 py-2.5 text-body rounded-sm focus:outline-none placeholder:text-[--text-muted]"
+                    style={{
+                      background: "var(--bg-surface)",
+                      color: "var(--text-primary)",
+                      border: "1px solid var(--border)",
+                    }}
+                    placeholder="Enter password"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={anyLoading}
+                  className="w-full py-2.5 font-bold text-body text-white rounded-sm disabled:opacity-50 transition-colors hover:brightness-110"
+                  style={{ background: "var(--bg-active)" }}
+                >
+                  {loading ? "..." : "Sign in"}
+                </button>
+              </form>
+            )}
+
+            {/* Divider — between email/password and SSO */}
+            {configLoaded && emailEnabled && firebaseEnabled && (
+              <div className="flex items-center gap-3 my-5">
+                <div className="flex-1 h-px" style={{ background: "var(--border)" }} />
+                <span className="text-caption" style={{ color: "var(--text-muted)" }}>
+                  or
+                </span>
+                <div className="flex-1 h-px" style={{ background: "var(--border)" }} />
+              </div>
+            )}
+
+            {/* OAuth (SSO) — secondary */}
+            {configLoaded && firebaseEnabled && (
               <div className="space-y-3">
                 {/* Apple — listed first per Apple HIG */}
                 <button
@@ -253,135 +304,30 @@ export function LoginPage() {
                   )}
                 </button>
               </div>
+            )}
 
-              {/* Divider — only show if email login is also available */}
-              {configLoaded && emailEnabled && (
-                <div className="flex items-center gap-3 my-5">
-                  <div className="flex-1 h-px" style={{ background: "var(--border)" }} />
-                  <span className="text-caption" style={{ color: "var(--text-muted)" }}>
-                    or
-                  </span>
-                  <div className="flex-1 h-px" style={{ background: "var(--border)" }} />
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Error display (always visible, e.g. OAuth errors) */}
-          {error && (
-            <div
-              className="text-caption px-3 py-2 rounded-sm mt-4"
-              style={{ background: "rgba(224,30,90,0.1)", color: "var(--accent-red)" }}
-            >
-              {error}
-            </div>
-          )}
-
-          {/* Email/password form — only in local/dev mode */}
-          {configLoaded && emailEnabled && (
-            <>
-              <form onSubmit={handleSubmit} className="space-y-4">
-                {isRegister && (
-                  <div>
-                    <label className="block text-caption font-bold mb-1" style={{ color: "var(--text-secondary)" }}>
-                      Display Name
-                    </label>
-                    <input
-                      type="text"
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      className="w-full px-3 py-2.5 text-body rounded-sm focus:outline-none placeholder:text-[--text-muted]"
-                      style={{
-                        background: "var(--bg-surface)",
-                        color: "var(--text-primary)",
-                        border: "1px solid var(--border)",
-                      }}
-                      placeholder="Your name"
-                    />
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-caption font-bold mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Email
-                  </label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    className="w-full px-3 py-2.5 text-body rounded-sm focus:outline-none placeholder:text-[--text-muted]"
-                    style={{
-                      background: "var(--bg-surface)",
-                      color: "var(--text-primary)",
-                      border: "1px solid var(--border)",
-                    }}
-                    placeholder="you@example.com"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-caption font-bold mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Password
-                  </label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    className="w-full px-3 py-2.5 text-body rounded-sm focus:outline-none placeholder:text-[--text-muted]"
-                    style={{
-                      background: "var(--bg-surface)",
-                      color: "var(--text-primary)",
-                      border: "1px solid var(--border)",
-                    }}
-                    placeholder="Enter password"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={anyLoading}
-                  className="w-full py-2.5 font-bold text-body text-white rounded-sm disabled:opacity-50 transition-colors hover:brightness-110"
-                  style={{ background: "var(--bg-active)" }}
-                >
-                  {loading
-                    ? "..."
-                    : isRegister
-                      ? "Create account"
-                      : "Sign in with email"}
-                </button>
-              </form>
-
-              <div className="mt-6 text-center">
-                <button
-                  onClick={() => {
-                    setIsRegister(!isRegister);
-                    setError("");
-                  }}
-                  className="text-caption hover:underline"
-                  style={{ color: "var(--text-link)" }}
-                >
-                  {isRegister
-                    ? "Already have an account? Sign in"
-                    : "Don't have an account? Register"}
-                </button>
+            {/* Error display (email login or OAuth errors) */}
+            {error && (
+              <div
+                className="text-caption px-3 py-2 rounded-sm mt-4"
+                style={{ background: "rgba(224,30,90,0.1)", color: "var(--accent-red)" }}
+              >
+                {error}
               </div>
-            </>
-          )}
+            )}
 
-          {/* Privacy & Terms links */}
-          <div className="mt-6 text-center">
-            <a href="https://botschat.app/privacy.html" target="_blank" rel="noopener noreferrer" className="text-tiny hover:underline" style={{ color: "var(--text-muted)" }}>
-              Privacy Policy
-            </a>
-            <span className="mx-2 text-tiny" style={{ color: "var(--text-muted)" }}>·</span>
-            <a href="https://botschat.app/terms.html" target="_blank" rel="noopener noreferrer" className="text-tiny hover:underline" style={{ color: "var(--text-muted)" }}>
-              Terms of Service
-            </a>
+            {/* Privacy & Terms links */}
+            <div className="mt-6 text-center">
+              <a href="https://botschat.app/privacy.html" target="_blank" rel="noopener noreferrer" className="text-tiny hover:underline" style={{ color: "var(--text-muted)" }}>
+                Privacy Policy
+              </a>
+              <span className="mx-2 text-tiny" style={{ color: "var(--text-muted)" }}>·</span>
+              <a href="https://botschat.app/terms.html" target="_blank" rel="noopener noreferrer" className="text-tiny hover:underline" style={{ color: "var(--text-muted)" }}>
+                Terms of Service
+              </a>
+            </div>
           </div>
         </div>
-      </div>
       </div>
     </div>
   );

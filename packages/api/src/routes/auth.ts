@@ -63,11 +63,43 @@ auth.post("/register", async (c) => {
   return c.json({ id, email, token, refreshToken }, 201);
 });
 
-/** POST /api/auth/login — disabled in production (OAuth only) */
-auth.post("/login", async (c) => {
-  if (c.env.ENVIRONMENT !== "development") {
-    return c.json({ error: "Email login is disabled. Please sign in with Google or GitHub." }, 403);
+/**
+ * Idempotently seed the default email/password account from env vars
+ * (DEFAULT_LOGIN_EMAIL / DEFAULT_LOGIN_PASSWORD). Called from /login so the
+ * account exists before the first authentication attempt. No-op if the vars
+ * are unset or the account already exists. Never overwrites an existing row,
+ * so a password rotated directly in D1 is preserved.
+ */
+async function ensureDefaultUser(env: Env): Promise<void> {
+  const email = env.DEFAULT_LOGIN_EMAIL?.trim().toLowerCase();
+  const password = env.DEFAULT_LOGIN_PASSWORD;
+  if (!email || !password) return;
+
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?")
+    .bind(email)
+    .first<{ id: string }>();
+  if (existing) return;
+
+  const id = generateId("u_");
+  const passwordHash = await hashPassword(password);
+  const displayName = email.split("@")[0] || "Admin";
+  try {
+    await env.DB.prepare(
+      "INSERT INTO users (id, email, password_hash, display_name, auth_provider) VALUES (?, ?, ?, ?, 'email')",
+    )
+      .bind(id, email, passwordHash, displayName)
+      .run();
+  } catch (err) {
+    // Race: a concurrent request created the same account — safe to ignore.
+    console.error("[auth] ensureDefaultUser insert failed:", err);
   }
+}
+
+/** POST /api/auth/login — email + password login (works in all environments). */
+auth.post("/login", async (c) => {
+  // Idempotently provision the default account from env vars, if configured,
+  // so it exists before the first authentication attempt.
+  await ensureDefaultUser(c.env);
 
   const { email, password } = await c.req.json<{
     email: string;
@@ -312,9 +344,9 @@ auth.post("/refresh", async (c) => {
 
 /** GET /api/auth/config — public endpoint returning allowed auth methods */
 auth.get("/config", (c) => {
-  const isDev = c.env.ENVIRONMENT === "development";
   return c.json({
-    emailEnabled: isDev,
+    // Email/password login is always available (custom login).
+    emailEnabled: true,
     googleEnabled: !!c.env.FIREBASE_PROJECT_ID,
     githubEnabled: !!c.env.FIREBASE_PROJECT_ID,
     appleEnabled: !!c.env.FIREBASE_PROJECT_ID,

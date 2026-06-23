@@ -12,6 +12,10 @@ export type Env = {
   PUBLIC_URL?: string;
   /** Secret for dev-token auth bypass (automated testing). Endpoint is 404 when unset. */
   DEV_AUTH_SECRET?: string;
+  /** Email for the default email/password account, auto-seeded on first login when set. */
+  DEFAULT_LOGIN_EMAIL?: string;
+  /** Password for the default email/password account, auto-seeded on first login when set. */
+  DEFAULT_LOGIN_PASSWORD?: string;
   /** FCM Service Account JSON for push notifications (stored as secret via `wrangler secret put`). */
   FCM_SERVICE_ACCOUNT_JSON?: string;
   /** APNs Auth Key (.p8 content) for direct iOS push via APNs HTTP/2 API. */

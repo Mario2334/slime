@@ -25,6 +25,18 @@ if [[ -z "${DEV_AUTH_SECRET:-}" ]]; then
   export DEV_AUTH_SECRET
 fi
 
+# ── Auto-set DEFAULT_LOGIN_EMAIL / DEFAULT_LOGIN_PASSWORD ────────────
+# Default email/password account, auto-seeded by the API on first login.
+# Override in your shell environment for anything beyond local dev.
+if [[ -z "${DEFAULT_LOGIN_EMAIL:-}" ]]; then
+  DEFAULT_LOGIN_EMAIL="admin@botschat.local"
+  export DEFAULT_LOGIN_EMAIL
+fi
+if [[ -z "${DEFAULT_LOGIN_PASSWORD:-}" ]]; then
+  DEFAULT_LOGIN_PASSWORD="botschat123"
+  export DEFAULT_LOGIN_PASSWORD
+fi
+
 # ── Colours ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; DIM='\033[2m'; NC='\033[0m'
 info()  { echo -e "${CYAN}▸${NC} $*"; }
@@ -128,7 +140,11 @@ do_build_web() {
 do_start() {
   kill_port 8787
   info "Starting wrangler dev on 0.0.0.0:8787…"
-  exec npx wrangler dev --config wrangler.toml --ip 0.0.0.0 --var ENVIRONMENT:development --var DEV_AUTH_SECRET:"$DEV_AUTH_SECRET"
+  exec npx wrangler dev --config wrangler.toml --ip 0.0.0.0 \
+    --var ENVIRONMENT:development \
+    --var DEV_AUTH_SECRET:"$DEV_AUTH_SECRET" \
+    --var DEFAULT_LOGIN_EMAIL:"$DEFAULT_LOGIN_EMAIL" \
+    --var DEFAULT_LOGIN_PASSWORD:"$DEFAULT_LOGIN_PASSWORD"
 }
 
 # ── Full dev environment (server + mock + browser) ───────────────────
@@ -140,7 +156,9 @@ do_start_full() {
   info "Starting wrangler dev on 0.0.0.0:8787…"
   npx wrangler dev --config wrangler.toml --ip 0.0.0.0 \
     --var ENVIRONMENT:development \
-    --var DEV_AUTH_SECRET:"$DEV_AUTH_SECRET" &
+    --var DEV_AUTH_SECRET:"$DEV_AUTH_SECRET" \
+    --var DEFAULT_LOGIN_EMAIL:"$DEFAULT_LOGIN_EMAIL" \
+    --var DEFAULT_LOGIN_PASSWORD:"$DEFAULT_LOGIN_PASSWORD" &
   WRANGLER_PID=$!
 
   wait_for_server
@@ -240,7 +258,10 @@ do_v2_start() {
   kill_port "$V2_PORT"
   info "Starting wrangler dev (v2) on 0.0.0.0:${V2_PORT}…"
   exec npx wrangler dev --config "$V2_CONFIG" --ip 0.0.0.0 --port "$V2_PORT" \
-    --var ENVIRONMENT:development --var DEV_AUTH_SECRET:"$DEV_AUTH_SECRET"
+    --var ENVIRONMENT:development \
+    --var DEV_AUTH_SECRET:"$DEV_AUTH_SECRET" \
+    --var DEFAULT_LOGIN_EMAIL:"$DEFAULT_LOGIN_EMAIL" \
+    --var DEFAULT_LOGIN_PASSWORD:"$DEFAULT_LOGIN_PASSWORD"
 }
 
 do_v2_deploy() {

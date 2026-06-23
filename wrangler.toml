@@ -41,6 +41,12 @@ GOOGLE_WEB_CLIENT_ID = "670756745871-1anrnjukhhu0a550j86blm771a2k3jou.apps.googl
 GOOGLE_IOS_CLIENT_ID = "670756745871-ct1k370fk3h5oj3f3gdabqv1nq2b7r54.apps.googleusercontent.com"
 # IMPORTANT: For production, set JWT_SECRET via `wrangler secret put JWT_SECRET`.
 # The app will refuse to start in non-development mode without it.
+#
+# Default email/password login account (auto-seeded on first login). For
+# production/cloud, set both as secrets (never put the password in [vars]):
+#   wrangler secret put DEFAULT_LOGIN_EMAIL
+#   wrangler secret put DEFAULT_LOGIN_PASSWORD
+# For local dev, scripts/dev.sh provides defaults (admin@botschat.local).
 
 # --- Dev settings ---
 [dev]
